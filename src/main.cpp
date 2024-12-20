@@ -5,12 +5,17 @@
 #define BUTTON_PIN GPIO_NUM_13
 uint8_t program = 0;
 
-const uint16_t PixelCount        = 300; // make sure to set this to the number of pixels in your strip
-const uint8_t  PixelPin          = 4;   // make sure to set this to the correct pin, ignored for Esp8266
-const uint8_t  AnimationChannels = 1;   // we only need one as all the pixels are animated at once
+const uint16_t PixelCount        = 300;                    // make sure to set this to the number of pixels in your strip
+const uint8_t  PixelPin          = 4;                      // make sure to set this to the correct pin, ignored for Esp8266
+const uint8_t  AnimationChannels = 1;                      // we only need one as all the pixels are animated at once
+const uint16_t AnimCount         = PixelCount / 5 * 2 + 1; // we only need enough animations for the tail and one extra
+const uint16_t PixelFadeDuration = 300;                    // third of a second
+// one second divide by the number of pixels = loop once a second
+const uint16_t NextPixelMoveDuration = 2000 / PixelCount; // how fast we move through the pixels
 
+NeoGamma<NeoGammaTableMethod>                colorGamma;
 NeoPixelBus<NeoGrbFeature, NeoWs2812xMethod> strip(PixelCount, PixelPin);
-NeoPixelAnimator                             animations(PixelCount, NEO_MILLISECONDS);
+NeoPixelAnimator                             animations(PixelCount);
 RgbColor                                     CylonEyeColor(HtmlColor(0x7f0000));
 
 // NeoPixelAnimator animations(2); // only ever need 2 animations
@@ -23,8 +28,11 @@ struct MyAnimationState
 {
   RgbColor StartingColor;
   RgbColor EndingColor;
+  uint16_t IndexPixel;
 };
-MyAnimationState animationState[AnimationChannels];
+MyAnimationState animationState[AnimCount];
+uint16_t         frontPixel = 0; // the front of the loop
+RgbColor         frontColor;     // the color at the front of the loop
 
 // Led Task Handle
 TaskHandle_t ledTaskHandle = NULL;
@@ -100,15 +108,50 @@ void FadeInFadeOutRinseRepeat(float luminance)
     uint16_t time                   = random(800, 2000);
     animationState[0].StartingColor = strip.GetPixelColor<RgbColor>(0);
     animationState[0].EndingColor   = target;
-    animations.StartAnimation(3, time, BlendAnimUpdate);
+    animations.StartAnimation(0, time, BlendAnimUpdate);
   }
   else {
     uint16_t time                   = random(600, 700);
     animationState[0].StartingColor = strip.GetPixelColor<RgbColor>(0);
     animationState[0].EndingColor   = RgbColor(0);
-    animations.StartAnimation(3, time, BlendAnimUpdate);
+    animations.StartAnimation(0, time, BlendAnimUpdate);
   }
   fadeToColor = !fadeToColor;
+}
+
+void FadeOutAnimUpdate(const AnimationParam& param)
+{
+  RgbColor updatedColor = RgbColor::LinearBlend(animationState[param.index].StartingColor, animationState[param.index].EndingColor, param.progress);
+  // apply the color to the strip
+  strip.SetPixelColor(animationState[param.index].IndexPixel, colorGamma.Correct(updatedColor));
+}
+
+void LoopAnimUpdate(const AnimationParam& param)
+{
+  if (param.state == AnimationState_Completed) {
+    // done, time to restart this position tracking animation/timer
+    animations.RestartAnimation(param.index);
+
+    // pick the next pixel inline to start animating
+    //
+    frontPixel = (frontPixel + 1) % PixelCount; // increment and wrap
+    if (frontPixel == 0) {
+      // we looped, lets pick a new front color
+      frontColor = HslColor(random(360) / 360.0f, 1.0f, 0.25f);
+    }
+
+    uint16_t indexAnim;
+    // do we have an animation available to use to animate the next front pixel?
+    // if you see skipping, then either you are going to fast or need to increase
+    // the number of animation channels
+    if (animations.NextAvailableAnimation(&indexAnim, 1)) {
+      animationState[indexAnim].StartingColor = frontColor;
+      animationState[indexAnim].EndingColor   = RgbColor(0, 0, 0);
+      animationState[indexAnim].IndexPixel    = frontPixel;
+
+      animations.StartAnimation(indexAnim, PixelFadeDuration, FadeOutAnimUpdate);
+    }
+  }
 }
 
 void SetRandomSeed()
@@ -167,6 +210,7 @@ void ledConfigTask(void* pvParameters)
   bool setup0done = false;
   bool setup1done = false;
   bool setup2done = false;
+  bool setup3done = false;
   while (true) {
     switch (program) {
       case 0:
@@ -209,6 +253,17 @@ void ledConfigTask(void* pvParameters)
         }
         else
           FadeInFadeOutRinseRepeat(0.2f);
+        break;
+      case 3:
+        if (!setup3done) {
+          Serial.println("Running Setup 3");
+          SetRandomSeed();
+          setup2done = false;
+          setup3done = true;
+          animations.StartAnimation(0, NextPixelMoveDuration, LoopAnimUpdate);
+        }
+        animations.UpdateAnimations();
+        strip.Show();
         break;
     }
     vTaskDelay(1);
