@@ -10,6 +10,9 @@ const uint8_t  PixelPin          = 4;                      // make sure to set t
 const uint8_t  AnimationChannels = 1;                      // we only need one as all the pixels are animated at once
 const uint16_t AnimCount         = PixelCount / 5 * 2 + 1; // we only need enough animations for the tail and one extra
 const uint16_t PixelFadeDuration = 300;                    // third of a second
+const uint16_t TailLength        = 20;                     // length of the tail, must be shorter than PixelCount
+const float    MaxLightness      = 0.4f;                   // max lightness at the head of the tail (0.5f is full bright)
+
 // one second divide by the number of pixels = loop once a second
 const uint16_t NextPixelMoveDuration = 2000 / PixelCount; // how fast we move through the pixels
 
@@ -31,6 +34,7 @@ struct MyAnimationState
   uint16_t IndexPixel;
 };
 MyAnimationState animationState[AnimCount];
+MyAnimationState animationStateTwo[PixelCount];
 uint16_t         frontPixel = 0; // the front of the loop
 RgbColor         frontColor;     // the color at the front of the loop
 
@@ -101,6 +105,35 @@ void BlendAnimUpdate(const AnimationParam& param)
   }
 }
 
+void BlendAnimUpdateTwo(const AnimationParam& param)
+{
+  RgbColor updatedColor =
+    RgbColor::LinearBlend(animationStateTwo[param.index].StartingColor, animationStateTwo[param.index].EndingColor, param.progress);
+  // apply the color to the strip
+  strip.SetPixelColor(param.index, updatedColor);
+}
+
+void PickRandom(float luminance)
+{
+  // pick random count of pixels to animate
+  uint16_t count = random(PixelCount);
+  while (count > 0) {
+    // pick a random pixel
+    uint16_t pixel = random(PixelCount);
+
+    // pick random time and random color
+    // we use HslColor object as it allows us to easily pick a color
+    // with the same saturation and luminance
+    uint16_t time                          = random(100, 400);
+    animationStateTwo[pixel].StartingColor = strip.GetPixelColor<RgbColor>(pixel);
+    animationStateTwo[pixel].EndingColor   = HslColor(random(360) / 360.0f, 1.0f, luminance);
+
+    animations.StartAnimation(pixel, time, BlendAnimUpdateTwo);
+
+    count--;
+  }
+}
+
 void FadeInFadeOutRinseRepeat(float luminance)
 {
   if (fadeToColor) {
@@ -138,6 +171,11 @@ void LoopAnimUpdate(const AnimationParam& param)
     if (frontPixel == 0) {
       // we looped, lets pick a new front color
       frontColor = HslColor(random(360) / 360.0f, 1.0f, 0.25f);
+      // check if program has changed
+      if (program != 3) {
+        animations.StopAnimation(param.index);
+        return;
+      }
     }
 
     uint16_t indexAnim;
@@ -211,6 +249,7 @@ void ledConfigTask(void* pvParameters)
   bool setup1done = false;
   bool setup2done = false;
   bool setup3done = false;
+  bool setup4done = false;
   while (true) {
     switch (program) {
       case 0:
@@ -264,6 +303,21 @@ void ledConfigTask(void* pvParameters)
         }
         animations.UpdateAnimations();
         strip.Show();
+        break;
+      case 4:
+        if (!setup4done) {
+          Serial.println("Running Setup 4");
+          SetRandomSeed();
+          setup3done = false;
+          setup4done = true;
+        }
+        if (animations.IsAnimating()) {
+          animations.UpdateAnimations();
+          strip.Show();
+        }
+        else {
+          PickRandom(0.2f); // 0.0 = black, 0.25 is normal, 0.5 is bright
+        }
         break;
     }
     vTaskDelay(1);
