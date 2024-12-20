@@ -1,5 +1,5 @@
+#include "I2SSampler.h"
 #include <Arduino.h>
-#include <I2SSampler.h>
 #include <NeoPixelAnimator.h>
 #include <NeoPixelBus.h>
 
@@ -41,6 +41,72 @@ RgbColor         frontColor;     // the color at the front of the loop
 
 // Led Task Handle
 TaskHandle_t ledTaskHandle = NULL;
+// Led Sound Task Handle
+TaskHandle_t writer_task_handle = NULL;
+// i2s config - this is set up to read fro the left channel
+i2s_config_t i2s_config = {.mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+                           .sample_rate          = 44100,
+                           .bits_per_sample      = I2S_BITS_PER_SAMPLE_32BIT,
+                           .channel_format       = I2S_CHANNEL_FMT_ONLY_RIGHT,
+                           .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_STAND_I2S),
+                           .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
+                           .dma_buf_count        = 8,
+                           .dma_buf_len          = 64,
+                           .use_apll             = false,
+                           .tx_desc_auto_clear   = false,
+                           .fixed_mclk           = 0};
+
+// i2s pins
+i2s_pin_config_t i2s_pins = {.bck_io_num = GPIO_NUM_32, .ws_io_num = GPIO_NUM_25, .data_out_num = I2S_PIN_NO_CHANGE, .data_in_num = GPIO_NUM_33};
+
+I2SSampler* i2s_sampler = NULL;
+
+float calculateRMS(int16_t* buffer, int32_t num_samples)
+{
+  double sum = 0;
+  for (int i = 0; i < num_samples; i++) {
+    sum += buffer[i] * buffer[i];
+  }
+  return sqrt(sum / num_samples);
+}
+
+void setLedsByRMS(float rms)
+{
+  // Mapear el RMS al rango de 0 a PixelCount (300 LEDs)
+  uint16_t numLedsOn = map(rms, 0, 3000, 0, PixelCount); // Ajusta el límite máximo (3000) según el nivel de RMS esperado
+
+  for (uint16_t i = 0; i < PixelCount; i++) {
+    if (i < numLedsOn) {
+      // Progresión de verde a rojo: cambia el valor RGB según la posición
+      uint8_t red   = map(i, 0, PixelCount - 1, 0, 255);
+      uint8_t green = map(i, 0, PixelCount - 1, 255, 0);
+      strip.SetPixelColor(i, RgbColor(red, green, 0));
+    }
+    else {
+      // Apagar el LED si está fuera del rango
+      strip.SetPixelColor(i, RgbColor(0, 0, 0));
+    }
+  }
+  strip.Show();
+}
+
+void i2sWriterTask(void* param)
+{
+  I2SSampler* sampler = (I2SSampler*)param;
+  while (true) {
+    if (program != 6) {
+      vTaskDelay(10);
+      continue;
+    }
+
+    int16_t* audio_buffer = sampler->getCapturedAudioBuffer();
+    int32_t  buffer_size  = sampler->getBufferSizeInBytes() / sizeof(int16_t);
+    float    rms          = calculateRMS(audio_buffer, buffer_size);
+    // Llamar a la función para actualizar los LEDs según el RMS
+    setLedsByRMS(rms);
+    vTaskDelay(50);
+  }
+}
 
 void FadeAll(uint8_t darkenBy)
 {
@@ -293,6 +359,8 @@ void ledConfigTask(void* pvParameters)
   bool setup3done = false;
   bool setup4done = false;
   bool setup5done = false;
+  bool setup6done = false;
+  bool setup7done = false;
   while (true) {
     switch (program) {
       case 0:
@@ -374,8 +442,31 @@ void ledConfigTask(void* pvParameters)
         animations.UpdateAnimations();
         strip.Show();
         break;
+      case 6:
+        if (!setup6done) {
+          Serial.println("Running Setup 6");
+          setup5done = false;
+          setup6done = true;
+        }
+        break;
+      case 7:
+        if (!setup7done) {
+          Serial.println("Running Setup 7");
+          setup6done = false;
+          // switch all pixels off
+          for (uint16_t pixel = 0; pixel < PixelCount; pixel++) {
+            strip.SetPixelColor(pixel, RgbColor(0));
+          }
+          strip.Show();
+          setup7done = true;
+        }
+        break;
+      case 8:
+        // return to setup 0
+        setup7done = false;
+        program    = 0;
+        break;
     }
-
     vTaskDelay(1);
   }
 }
@@ -386,6 +477,19 @@ void setup()
   while (!Serial)
     ; // wait for serial attach
 
+  //   // Inicializar el sampler I2S
+  //   i2s_sampler = new I2SSampler();
+
+  //   // Iniciar el muestreo desde el micrófono
+  //   i2s_sampler->start(I2S_NUM_1, i2s_pins, i2s_config, 8192, writer_task_handle); // Buffer reducido para mayor rapidez
+
+  //   if (xTaskCreate(i2sWriterTask, "I2S Writer Task", 4096, i2s_sampler, 1, &writer_task_handle) != pdPASS) {
+  //     Serial.println("Failed to create Sound Led Task");
+  //     ESP.restart();
+  //   }
+  //   else
+  //     Serial.println("Sound Task Created");
+
   strip.Begin();
   strip.Show();
 
@@ -395,7 +499,7 @@ void setup()
     ESP.restart();
   }
   else
-    Serial.println("Led Task Created\n");
+    Serial.println("Led Task Created");
 }
 
 void loop()
@@ -403,8 +507,8 @@ void loop()
   if (digitalRead(BUTTON_PIN) == HIGH) {
     program++;
     while (digitalRead(BUTTON_PIN) == HIGH)
-      vTaskDelay(1);
+      vTaskDelay(10);
   }
 
-  vTaskDelay(1);
+  vTaskDelay(10);
 }
