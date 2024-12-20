@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <I2SSampler.h>
 #include <NeoPixelAnimator.h>
 #include <NeoPixelBus.h>
 
@@ -115,6 +116,9 @@ void BlendAnimUpdateTwo(const AnimationParam& param)
 
 void PickRandom(float luminance)
 {
+  // Crear un array para rastrear los píxeles seleccionados
+  bool selectedPixels[PixelCount] = {false};
+
   // pick random count of pixels to animate
   uint16_t count = random(PixelCount);
   while (count > 0) {
@@ -130,7 +134,20 @@ void PickRandom(float luminance)
 
     animations.StartAnimation(pixel, time, BlendAnimUpdateTwo);
 
+    // Marcar el píxel como seleccionado
+    selectedPixels[pixel] = true;
+
     count--;
+  }
+
+  // Incluir los píxeles no seleccionados en la animación con el color apagado
+  for (uint16_t pixel = 0; pixel < PixelCount; pixel++) {
+    if (!selectedPixels[pixel]) {
+      animationStateTwo[pixel].StartingColor = strip.GetPixelColor<RgbColor>(pixel);
+      animationStateTwo[pixel].EndingColor   = RgbColor(0, 0, 0);
+      uint16_t time                          = random(100, 400);
+      animations.StartAnimation(pixel, time, BlendAnimUpdateTwo);
+    }
   }
 }
 
@@ -192,6 +209,31 @@ void LoopAnimUpdate(const AnimationParam& param)
   }
 }
 
+void LoopAnimUpdateTwo(const AnimationParam& param)
+{
+  // wait for this animation to complete,
+  // we are using it as a timer of sorts
+  if (param.state == AnimationState_Completed) {
+    // done, time to restart this position tracking animation/timer
+    animations.RestartAnimation(param.index);
+
+    // rotate the complete strip one pixel to the right on every update
+    strip.RotateRight(1);
+  }
+}
+
+void DrawTailPixels()
+{
+  // using Hsl as it makes it easy to pick from similiar saturated colors
+  float hue = random(360) / 360.0f;
+  for (uint16_t index = 0; index < strip.PixelCount() && index <= TailLength; index++) {
+    float    lightness = index * MaxLightness / TailLength;
+    RgbColor color     = HslColor(hue, 1.0f, lightness);
+
+    strip.SetPixelColor(index, colorGamma.Correct(color));
+  }
+}
+
 void SetRandomSeed()
 {
   uint32_t seed;
@@ -250,6 +292,7 @@ void ledConfigTask(void* pvParameters)
   bool setup2done = false;
   bool setup3done = false;
   bool setup4done = false;
+  bool setup5done = false;
   while (true) {
     switch (program) {
       case 0:
@@ -319,7 +362,20 @@ void ledConfigTask(void* pvParameters)
           PickRandom(0.2f); // 0.0 = black, 0.25 is normal, 0.5 is bright
         }
         break;
+      case 5:
+        if (!setup5done) {
+          Serial.println("Running Setup 5");
+          SetRandomSeed();
+          setup4done = false;
+          setup5done = true;
+          DrawTailPixels();
+          animations.StartAnimation(0, 66, LoopAnimUpdateTwo);
+        }
+        animations.UpdateAnimations();
+        strip.Show();
+        break;
     }
+
     vTaskDelay(1);
   }
 }
